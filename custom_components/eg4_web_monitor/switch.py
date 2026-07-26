@@ -25,6 +25,7 @@ else:
 from . import EG4ConfigEntry
 from .base_entity import EG4BaseSwitch
 from .const import (
+    DEVICE_TYPE_GRIDBOSS,
     FUNCTION_PARAM_MAPPING,
     PARAM_FUNC_AC_CHARGE,
     PARAM_FUNC_AC_COUPLING_FUNCTION,
@@ -44,6 +45,7 @@ from .const import (
 )
 from .coordinator import EG4DataUpdateCoordinator
 from .control_discovery import setup_control_entity_discovery
+from .smart_port import create_smart_port_switches
 from .utils import (
     flag_offgrid_control_suppression,
     is_family_control_supported,
@@ -377,6 +379,11 @@ def _create_switch_entities(
                             mode_config=mode_config,
                         )
                     )
+
+        elif device_type == DEVICE_TYPE_GRIDBOSS:
+            # Per-port smart port function switches (register 229,
+            # LOCAL/HYBRID only — see smart_port.py for the design).
+            entities.extend(create_smart_port_switches(coordinator, serial))
 
     return entities
 

@@ -39,6 +39,8 @@ from .const import (
     GRID_TYPE_SPLIT_PHASE,
     INVERTER_FAMILY_DEFAULT_MODELS,
     MANUFACTURER,
+    MIDBOX_REG_SMART_PORT_FUNCTIONS,
+    decode_midbox_smart_port_functions,
 )
 from .coordinator_mixins import (
     BATTERY_CARRY_FORWARD_MAX_AGE,
@@ -758,6 +760,54 @@ class LocalTransportMixin(_MixinBase):
 
         return params, complete
 
+    async def _read_midbox_smart_port_functions(
+        self, transport: Any, serial: str
+    ) -> dict[str, Any]:
+        """Read a GridBOSS's register-229 per-port function enables.
+
+        Returns the decoded cloud-named booleans (FUNC_SMART_LOAD_EN_{n},
+        FUNC_SMART_LOAD_GRID_ON_{n}, FUNC_AC_COUPLE_EN_{n}) for the
+        parameter store — register layout and pin evidence in
+        const/modbus.py. The register is unmapped in pylxpweb's MIDBOX name
+        map (reg-117 precedent, GH #272), so the raw read is decoded here.
+
+        A failed or empty read carries the previous cycle's values forward
+        (#282: a partial read must not blank known parameter values); the
+        smart port switches simply stay on last-known state until a read
+        lands, and show unavailable until the first one ever does.
+        """
+        try:
+            if transport is not None:
+                if not transport.is_connected:
+                    await transport.connect()
+                raw_map = await transport.read_parameters(
+                    MIDBOX_REG_SMART_PORT_FUNCTIONS, 1
+                )
+                # dict guard before .get: transports return dict[int, int],
+                # but a non-dict from a partial transport double must fall
+                # into carry-forward, not raise here.
+                raw = (
+                    raw_map.get(MIDBOX_REG_SMART_PORT_FUNCTIONS)
+                    if isinstance(raw_map, dict)
+                    else None
+                )
+                if isinstance(raw, int):
+                    return decode_midbox_smart_port_functions(raw)
+                _LOGGER.debug(
+                    "Smart port function read for %s returned no register "
+                    "value (%s); carrying forward",
+                    serial,
+                    raw_map,
+                )
+        except Exception as err:
+            _LOGGER.debug(
+                "Smart port function read failed for %s: %s; carrying forward",
+                serial,
+                err,
+            )
+        previous = (self.data or {}).get("parameters", {}).get(serial)
+        return dict(previous) if previous else {}
+
     def _build_local_device_data(
         self,
         inverter: BaseInverter,
@@ -1302,7 +1352,9 @@ class LocalTransportMixin(_MixinBase):
                 processed["devices"][serial] = device_data
                 device_availability[serial] = True
 
-                processed["parameters"][serial] = {}
+                processed["parameters"][
+                    serial
+                ] = await self._read_midbox_smart_port_functions(transport, serial)
 
                 _LOGGER.debug(
                     "LOCAL: Updated GridBOSS %s (%s) - FW: %s, Grid: %sW, Load: %sW",

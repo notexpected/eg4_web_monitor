@@ -125,6 +125,8 @@ from .config_keys import (
 from .modbus import (
     AC_CHARGE_SCHEDULE_BASE_REGISTER,
     LOCAL_AC_CHARGE_TIME_PARAM_KEYS,
+    MIDBOX_REG_SMART_PORT_FUNCTIONS,
+    MIDBOX_SMART_PORT_FUNCTION_BASE_BITS,
     PARAM_AC_COUPLE_END_SOC,
     PARAM_AC_COUPLE_START_SOC,
     PARAM_SMART_LOAD_END_SOC,
@@ -183,6 +185,8 @@ from .modbus import (
     REG_SYSTEM_CHARGE_VOLT_LIMIT,
     SCHEDULE_TIME_TYPES,
     ScheduleTimeSpec,
+    decode_midbox_smart_port_functions,
+    midbox_smart_port_function_bit,
 )
 
 # Device types and inverter families - extracted to device_types.py
@@ -587,8 +591,12 @@ __all__ = [
     "REG_START_PV_VOLT",
     "AC_CHARGE_SCHEDULE_BASE_REGISTER",
     "LOCAL_AC_CHARGE_TIME_PARAM_KEYS",
+    "MIDBOX_REG_SMART_PORT_FUNCTIONS",
+    "MIDBOX_SMART_PORT_FUNCTION_BASE_BITS",
     "SCHEDULE_TIME_TYPES",
     "ScheduleTimeSpec",
+    "decode_midbox_smart_port_functions",
+    "midbox_smart_port_function_bit",
     "SYSTEM_CHARGE_VOLT_LIMIT_MIN",
     "SYSTEM_CHARGE_VOLT_LIMIT_MAX",
     "SYSTEM_CHARGE_VOLT_LIMIT_STEP",

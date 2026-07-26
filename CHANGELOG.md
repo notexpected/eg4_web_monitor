@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GridBOSS smart port enable switches**: twelve per-port switches on the GridBOSS device — *Smart Load* and *Grid Always On* for ports in Smart Load mode, *AC Couple* for ports in AC Couple mode — the enable toggles the portal shows next to the Smart Port mode selector the integration already carries. All twelve flags live in GridBOSS holding register 229, pinned raw↔named across three systems (two cloud register dumps whose range read leaks the raw value, plus a live dongle read matching a known port configuration; evidence in `const/modbus.py`). Local and Hybrid connections only: state reads ride the MID refresh cycle, local writes are a locked read-modify-write with a post-write verify, and Hybrid falls back to the cloud `functionControl` wrappers when the local link is down. Each switch is available only while its port is in the matching mode — which mirrors the firmware itself: live write tests show a mode-consistent enable bit persists while a flag for a mode the port is not in is silently reverted (the verify read surfaces that class as a rejected write rather than a fake success). Cloud-only connections are a documented follow-up (needs a midbox settings range read / pylxpweb getter).
+
 ## [3.5.1-beta.8] - 2026-08-03
 
 This release delivers the two long-open community PRs from @notexpected, merged after their final review rounds, plus same-day hardening follow-ups from those reviews.

@@ -417,6 +417,36 @@ class HTTPUpdateMixin(_MixinBase):
 
         return data
 
+    async def _update_midbox_smart_port_parameters(
+        self, processed: dict[str, Any]
+    ) -> None:
+        """Refresh register-229 smart-port function params for GridBOSS devices.
+
+        HYBRID only in practice: the read rides each MID device's attached
+        local transport. Pure-cloud MID devices have no transport and are
+        skipped — without a local transport the smart port switches are not
+        created (see smart_port.py), and a cloud read of these params needs
+        a range read the integration does not do yet (documented follow-up).
+        A down link is skipped the same way; the previous cycle's values are
+        already carried in ``processed["parameters"]`` (#282 semantics), and
+        a failed read inside the helper carries forward too.
+        """
+        station = self.station
+        if station is None:
+            return
+        params_store = processed.setdefault("parameters", {})
+        devices = processed.get("devices", {})
+        for mid in getattr(station, "all_mid_devices", None) or []:
+            serial = str(mid.serial_number)
+            if serial not in devices:
+                continue
+            transport = getattr(mid, "transport", None)
+            if transport is None or is_transport_link_down(mid):
+                continue
+            params_store[serial] = await self._read_midbox_smart_port_functions(
+                transport, serial
+            )
+
     async def _async_update_http_data(
         self,
         include_mid_refresh: bool = True,
@@ -1343,6 +1373,13 @@ class HTTPUpdateMixin(_MixinBase):
         # Check if we need to refresh parameters for any inverters
         if "parameters" not in processed:
             processed["parameters"] = {}
+
+        # GridBOSS smart-port function enables (register 229): read through
+        # each MID device's attached local transport. A single-register read
+        # per cycle on the persistently-held dongle socket — deliberately not
+        # gated on the dongle MID-refresh interval, so a portal/app-side
+        # toggle converges within one HTTP cycle.
+        await self._update_midbox_smart_port_parameters(processed)
 
         inverters_needing_params = []
         for serial, device_data in processed["devices"].items():

@@ -420,3 +420,79 @@ SCHEDULE_TIME_TYPES: tuple[ScheduleTimeSpec, ...] = (
         write_via_time_api=True,
     ),
 )
+
+
+# =============================================================================
+# GridBOSS (MIDBOX) smart port function enables — holding register 229
+# =============================================================================
+# The per-port enable toggles the portal shows on the GridBOSS settings page
+# all live in one register: four 4-bit groups, port order 1-4 within each
+# group (bit = base + port - 1):
+#
+#   bits 0-3    FUNC_SMART_LOAD_EN_{1..4}       Smart Load enable
+#   bits 4-7    FUNC_SMART_LOAD_GRID_ON_{1..4}  Smart Load "Grid Always On"
+#   bits 8-11   FUNC_AC_COUPLE_EN_{1..4}        AC Couple enable
+#   bits 12-15  FUNC_SHEDDING_MODE_EN_{1..4}    Shedding mode (not exposed)
+#
+# No public GridBOSS Modbus spec exists, so the layout is pinned by
+# raw↔named lockstep across three systems: the cloud range read leaks the
+# raw register value through a spurious "HOLD_OFFLINE_TIMEOUT" param
+# (raw ÷ 10 — the same raw-value leak MIDBOX_HOLD_SMART_PORT_MODE provides
+# for register 20), giving raw + cloud-decoded names in one read.
+#   - pylxpweb docs/inverters/GridBoss_43XXXXXX85.md: raw 152 = bits 3/4/7
+#     with exactly FUNC_SMART_LOAD_EN_4, FUNC_SMART_LOAD_GRID_ON_1 and
+#     FUNC_SMART_LOAD_GRID_ON_4 reading True.
+#   - pylxpweb docs/inverters/GridBoss_example.md: raw 256 = bit 8 with
+#     exactly FUNC_AC_COUPLE_EN_1 reading True.
+#   - Live dongle read on a third GridBOSS (fw IAAB-1300, 2026-07-26):
+#     raw 117 = smart-load enables on ports 1/3 + grid-on on ports 1-3,
+#     matching the unit's known configuration (ports 1-3 Smart Load and
+#     energized, port 4 unused, no AC-coupled source).
+#
+# pylxpweb's MIDBOX name map does not carry these params (reg-117 precedent,
+# GH #272): local reads surface the plain "229" key and local writes go
+# through the raw register address with integration-side bit masking. Cloud
+# writes use pylxpweb's enable_smart_load / enable_ac_couple /
+# set_smart_load_grid_on functionControl wrappers instead — the cloud
+# rejects raw writes of this register shape on MID devices (range-read-only
+# parameter access).
+#
+# Local FC06 writes are live-verified on the third system (2026-07-26): a
+# MODE-CONSISTENT bit write persists (FUNC_SMART_LOAD_EN_2 set while port 2
+# is in Smart Load mode: raw 117 → 119, held on re-read, restored), while a
+# mode-INCONSISTENT one is silently reverted by the firmware within a
+# second (FUNC_SMART_LOAD_EN_4 on an Unused port: write echoes 125,
+# read-back 117). The switches only offer writes matching the port's
+# current mode, mirroring exactly the writes the firmware accepts — and the
+# read-modify-write's verify read surfaces the silent-revert class
+# regardless (write_midbox_smart_port_function).
+MIDBOX_REG_SMART_PORT_FUNCTIONS = 229
+
+# Cloud function-param prefix → base bit of its 4-bit per-port group.
+# FUNC_SHEDDING_MODE_EN (bits 12-15) is deliberately absent: no entity
+# exposes it, and decode output feeds the parameter store 1:1.
+MIDBOX_SMART_PORT_FUNCTION_BASE_BITS: dict[str, int] = {
+    "FUNC_SMART_LOAD_EN": 0,
+    "FUNC_SMART_LOAD_GRID_ON": 4,
+    "FUNC_AC_COUPLE_EN": 8,
+}
+
+
+def midbox_smart_port_function_bit(param_prefix: str, port: int) -> int:
+    """Bit position of one port's function flag in register 229."""
+    return MIDBOX_SMART_PORT_FUNCTION_BASE_BITS[param_prefix] + (port - 1)
+
+
+def decode_midbox_smart_port_functions(raw: int) -> dict[str, bool]:
+    """Decode a raw register-229 value into cloud-named per-port booleans.
+
+    The keys match the cloud API's functionControl param names
+    (``FUNC_SMART_LOAD_EN_1`` … ``FUNC_AC_COUPLE_EN_4``), so a LOCAL/HYBRID
+    decode populates the parameter store with the same names a future cloud
+    read path would.
+    """
+    return {
+        f"{prefix}_{port}": bool((raw >> (base + port - 1)) & 1)
+        for prefix, base in MIDBOX_SMART_PORT_FUNCTION_BASE_BITS.items()
+        for port in range(1, 5)
+    }

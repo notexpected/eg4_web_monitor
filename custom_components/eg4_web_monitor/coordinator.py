@@ -92,6 +92,9 @@ from .const import (
     DOMAIN,
     HYBRID_LOCAL_DONGLE,
     HYBRID_LOCAL_MODBUS,
+    MIDBOX_REG_SMART_PORT_FUNCTIONS,
+    decode_midbox_smart_port_functions,
+    midbox_smart_port_function_bit,
 )
 from .battery_migration import async_migrate_battery_keys
 from .cloud_requests import (
@@ -562,6 +565,12 @@ class EG4DataUpdateCoordinator(
         self._removal_device_observed_since: float | None = None
         self._removal_battery_observed_since: float | None = None
         self._removal_battery_parent_since: dict[str, float | None] = {}
+
+        # Per-serial locks serializing the register-229 read-modify-write in
+        # write_midbox_smart_port_function (two rapid switch toggles must not
+        # interleave their read/write pairs and lose an update).
+        self._midbox_function_locks: dict[str, asyncio.Lock] = {}
+
 
         # Round-robin battery cache for LOCAL/HYBRID Modbus.
         # Some inverter firmware rotates which physical batteries appear in the
@@ -1792,6 +1801,94 @@ class EG4DataUpdateCoordinator(
             failure_args=(register,),
             translated_error=lambda err: f"Failed to write register {register}: {err}",
         )
+
+    async def write_midbox_smart_port_function(
+        self,
+        serial: str,
+        param_prefix: str,
+        port: int,
+        enabled: bool,
+    ) -> None:
+        """Toggle one GridBOSS smart-port function bit via the local transport.
+
+        Read-modify-write on holding register 229 (the per-port function
+        enables — layout and evidence in const/modbus.py). The register is
+        unmapped in pylxpweb's MIDBOX name map, so the bit masking happens
+        here against a FRESH read (a cached base could clobber sibling bits
+        changed portal-side since the last poll), with a per-serial lock so
+        two rapid toggles cannot interleave their read/write pairs.
+
+        The post-write verify read is the state source: its decode seeds the
+        parameter cache (entities converge without waiting for the next
+        dongle cycle) and a bit still reading the pre-write value raises —
+        the firmware-NAK class where a write echoes OK but silently does not
+        stick (#251/#331 precedent).
+
+        Args:
+            serial: GridBOSS serial number.
+            param_prefix: Function prefix from
+                MIDBOX_SMART_PORT_FUNCTION_BASE_BITS (e.g.
+                ``FUNC_SMART_LOAD_EN``).
+            port: Smart port number (1-4).
+            enabled: Desired bit state.
+
+        Raises:
+            HomeAssistantError: If no local transport is available, any
+                read/write fails, or the device rejects the write.
+        """
+        bit = midbox_smart_port_function_bit(param_prefix, port)
+        param_name = f"{param_prefix}_{port}"
+        register = MIDBOX_REG_SMART_PORT_FUNCTIONS
+        lock = self._midbox_function_locks.setdefault(serial, asyncio.Lock())
+        async with lock:
+            transport = self.get_local_transport(serial)
+            if not transport:
+                raise HomeAssistantError(
+                    "No local transport available for smart port function write"
+                )
+            try:
+                if not transport.is_connected:
+                    _LOGGER.debug(
+                        "Reconnecting transport for %s before writing %s",
+                        serial,
+                        param_name,
+                    )
+                    await transport.connect()
+
+                current = await transport.read_parameters(register, 1)
+                raw = current.get(register)
+                if not isinstance(raw, int):
+                    raise HomeAssistantError(
+                        f"Register {register} pre-write read returned no value"
+                    )
+                if enabled:
+                    new_raw = raw | (1 << bit)
+                else:
+                    new_raw = raw & ~(1 << bit) & 0xFFFF
+                if new_raw != raw:
+                    await transport.write_parameters({register: new_raw})
+                verify = await transport.read_parameters(register, 1)
+            except HomeAssistantError:
+                raise
+            except Exception as err:
+                _LOGGER.error("Failed to write %s for %s: %s", param_name, serial, err)
+                raise HomeAssistantError(
+                    f"Failed to write {param_name}: {err}"
+                ) from err
+
+        verified_raw = verify.get(register)
+        if isinstance(verified_raw, int):
+            # Post-write truth for ALL 12 function params — a concurrent
+            # portal-side change of a sibling bit lands here too.
+            self.note_parameters_written(
+                serial, decode_midbox_smart_port_functions(verified_raw)
+            )
+            if bool((verified_raw >> bit) & 1) != enabled:
+                raise HomeAssistantError(
+                    f"{param_name} write was rejected by the device "
+                    f"(register {register} still reads 0x{verified_raw:04x})"
+                )
+        _LOGGER.debug("Wrote %s = %s for %s", param_name, enabled, serial)
 
     # ── Battery control regime (SOC vs Voltage, register 179 bits 9/10) ──────
 
