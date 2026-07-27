@@ -89,6 +89,7 @@ from custom_components.eg4_web_monitor.const import FUNCTION_PARAM_MAPPING
 from custom_components.eg4_web_monitor.const.modbus import (
     PARAM_AC_COUPLE_END_SOC,
     PARAM_AC_COUPLE_START_SOC,
+    PARAM_BIT_AC_CHARGE_TYPE,
     PARAM_FUNC_AC_CHARGE,
     PARAM_FUNC_AC_COUPLING_FUNCTION,
     PARAM_FUNC_BAT_CHARGE_CONTROL,
@@ -1731,8 +1732,9 @@ def test_control_params_cover_all_integration_constants() -> None:
 
     A new control wired by name without a contract entry would silently
     bypass the register pinning above.  Cloud-only controls (register/bit
-    unpinned) are carved out via _CLOUD_ONLY_FUNCTION_PARAMS, whose own
-    honesty test keeps them honest.
+    unpinned) are carved out via _CLOUD_ONLY_FUNCTION_PARAMS, and controls
+    that deliberately bypass pylxpweb's wrong model via raw register access
+    via _MISMODELED_NAMED_PARAMS — each with its own honesty test.
     """
     from custom_components.eg4_web_monitor.const import modbus as modbus_const
 
@@ -1747,6 +1749,7 @@ def test_control_params_cover_all_integration_constants() -> None:
         - set(_CONTROL_REGISTER_CONTRACT)
         - set(_CLOUD_ONLY_FUNCTION_PARAMS)
         - set(_RAW_REGISTER_PARAMS)
+        - set(_MISMODELED_NAMED_PARAMS)
     )
     assert not missing, (
         "Control parameters without a register contract entry (add them to "
@@ -1869,6 +1872,56 @@ _RAW_REGISTER_PARAMS: dict[str, int] = {
     # whole watts, protocol default -50 W.
     PARAM_RAW_PTOUSER_START_CHARGE: REG_PTOUSER_START_CHARGE,
 }
+
+# Params that pylxpweb NAMES but MIS-MODELS, which the integration therefore
+# reads/writes RAW locally (and by name only via the cloud, where the server
+# decodes correctly).  name -> pylxpweb's CURRENT wrong (address, bit)
+# resolution, pinned so any pylxpweb-side change breaks loudly.
+_MISMODELED_NAMED_PARAMS: dict[str, tuple[int, int | None]] = {
+    # AC Charge Based On: a 3-bit field at reg 120 bits 1-3 whose cloud
+    # value equals raw & 0x0E (live raw-0x0054/cloud-4 lockstep; see the
+    # AC_CHARGE_TYPE evidence block in const/modbus.py).  pylxpweb models
+    # the key as a single bit — provably wrong — so
+    # coordinator.write_ac_charge_type RMWs the raw register and the
+    # LOCAL/refresh read paths decode raw.  The single-bit index drifts
+    # across pylxpweb releases (bit 3 through 0.9.39b4, bit 1 as of
+    # 0.9.39b8); each drift trips this test for re-verification, but the
+    # single-bit mis-model of the 3-bit field persists, so the raw bypass
+    # stays justified.
+    PARAM_BIT_AC_CHARGE_TYPE: (120, 1),
+}
+
+
+def test_mismodeled_named_params_stay_mismodeled() -> None:
+    """The mis-modeled carve-out must stay honest.
+
+    Each entry pins pylxpweb's CURRENT (wrong) resolution.  If pylxpweb
+    stops resolving the name, or resolves it differently — e.g. the
+    single-bit BIT_AC_CHARGE_TYPE row becomes a proper 3-bit field — the
+    integration's raw bypass is no longer justified by these tables:
+    re-verify against hardware, promote the param to
+    _CONTROL_REGISTER_CONTRACT, and migrate the control to the named
+    read/write paths.
+    """
+    offenders: list[str] = []
+    for name, (expected_addr, expected_bit) in _MISMODELED_NAMED_PARAMS.items():
+        resolutions = _resolve_param_in_pylxpweb(name)
+        if not resolutions:
+            offenders.append(
+                f"{name}: no longer known to pylxpweb's tables — the raw "
+                f"bypass rationale is stale; re-verify the register"
+            )
+        for source, address, bit in resolutions:
+            if (address, bit) != (expected_addr, expected_bit):
+                offenders.append(
+                    f"{name}: {source} table now says reg {address} bit {bit} "
+                    f"(pinned wrong model was reg {expected_addr} bit "
+                    f"{expected_bit}) — pylxpweb changed; re-verify and "
+                    f"promote to _CONTROL_REGISTER_CONTRACT"
+                )
+    assert not offenders, (
+        "Mis-modeled named-param carve-out violations:\n  " + "\n  ".join(offenders)
+    )
 
 
 def test_raw_register_params_stay_unnamed() -> None:

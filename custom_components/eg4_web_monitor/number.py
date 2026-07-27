@@ -31,6 +31,7 @@ from .const import (
     AC_CHARGE_POWER_MAX,
     AC_CHARGE_POWER_MIN,
     AC_CHARGE_POWER_STEP,
+    AC_CHARGE_TYPE_THRESHOLD_MODES,
     AC_CHARGE_VOLTAGE_MAX,
     AC_CHARGE_VOLTAGE_MIN,
     AC_CHARGE_VOLTAGE_STEP,
@@ -140,6 +141,7 @@ from .const import (
 from .coordinator import EG4DataUpdateCoordinator
 from .control_discovery import setup_control_entity_discovery
 from .utils import (
+    ac_charge_type_allows,
     async_write_with_cloud_fallback,
     flag_offgrid_control_suppression,
     is_hybrid_family,
@@ -1320,6 +1322,21 @@ class ACChargeSOCLimitNumber(EG4BaseNumberEntity):
         self._attr_native_unit_of_measurement = "%"
         self._attr_icon = "mdi:battery-charging-medium"
         self._attr_native_precision = 0
+
+    @property
+    def available(self) -> bool:
+        """Additionally gate on the reg-120 "AC Charge Based On" selection.
+
+        On EG4_HYBRID, pylxpweb documents the AC-charge thresholds as "used
+        when charge type is SOC/Volt or Time+SOC/Volt" — in the app's "Time"
+        mode the SOC threshold side is ignored, so the entity goes
+        unavailable rather than offering a dead control. Fails open on
+        missing or unrecognized mode data, and on every other family
+        (:func:`utils.ac_charge_type_allows`).
+        """
+        return super().available and ac_charge_type_allows(
+            self.coordinator, self.serial, AC_CHARGE_TYPE_THRESHOLD_MODES
+        )
 
     @property
     def native_value(self) -> float | None:
@@ -2895,6 +2912,27 @@ class EG4VoltageNumber(EG4BaseNumberEntity):
         self._attr_native_unit_of_measurement = "V"
         self._attr_icon = spec.icon
         self._attr_native_precision = spec.precision
+
+    @property
+    def available(self) -> bool:
+        """The AC charge pair gates on the reg-120 "AC Charge Based On" mode.
+
+        pylxpweb documents regs 158-161 as used "when charge type is
+        SOC/Volt or Time+SOC/Volt" — in the app's "Time" mode the firmware
+        ignores the threshold side entirely, so AC Charge Start/End Voltage
+        go unavailable exactly like their sibling AC Charge SOC Limit
+        (asymmetric gating was an adversarial-review finding). Every other
+        voltage spec is mode-independent. Fails open on missing or
+        unrecognized mode data, and on every family but EG4_HYBRID
+        (:func:`utils.ac_charge_type_allows`).
+        """
+        if not super().available:
+            return False
+        if self._spec.key in ("ac_charge_start_voltage", "ac_charge_end_voltage"):
+            return ac_charge_type_allows(
+                self.coordinator, self.serial, AC_CHARGE_TYPE_THRESHOLD_MODES
+            )
+        return True
 
     def _volts_from_spec_param(self, raw: Any) -> float:
         """Normalize a voltage parameter to volts using the spec's threshold.

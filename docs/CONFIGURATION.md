@@ -208,6 +208,16 @@ parameter sync.
 - **Battery Charge Control** / **Battery Discharge Control** — regulate the battery
   by **SOC** (closed-loop, default) or **Voltage** (open-loop). See
   [Battery control mode](#battery-control-mode-soc-vs-voltage) below.
+- **AC Charge Based On** — what arms grid (AC) charging: **Time** (the AC Charge
+  schedule windows), **SOC/Volt** (the battery SOC/voltage thresholds), or
+  **Time+SOC/Volt** (both) — the vendor app's three options (register 120,
+  EG4_HYBRID family only). The controls on the side the firmware ignores go
+  *unavailable*: in SOC/Volt mode the AC Charge schedule time entities, in
+  Time mode the AC Charge SOC Limit and the AC Charge Start/End Voltage pair.
+  This mirrors the vendor app, which hides the ignored side outright — the
+  trade-off is that a gated control cannot be pre-staged until the mode is
+  flipped. A value the app cannot display (possible via direct register
+  writes) shows as an unknown selection and gates nothing.
 
 ### Numbers
 

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from .coordinator import EG4DataUpdateCoordinator
 
 from .const import (
+    AC_CHARGE_TYPE_KNOWN_VALUES,
     BATTERY_KEY_PREFIX,
     BATTERY_KEY_SEPARATOR,
     BATTERY_KEY_SHORT_PREFIX,
@@ -26,6 +27,7 @@ from .const import (
     INVERTER_FAMILY_LXP,
     MANUFACTURER,
     MODEL_NAME_FAMILY_FALLBACK,
+    PARAM_BIT_AC_CHARGE_TYPE,
     SUPPORTED_INVERTER_MODELS,
 )
 
@@ -357,6 +359,46 @@ def is_hybrid_family(device_data: dict[str, Any]) -> bool:
     """
     features = device_data.get("features") or {}
     return bool(features.get("inverter_family") == INVERTER_FAMILY_EG4_HYBRID)
+
+
+def ac_charge_type_allows(
+    coordinator: "EG4DataUpdateCoordinator", serial: str, modes: frozenset[int]
+) -> bool:
+    """Whether the AC-charge-type mode gate leaves an entity available.
+
+    The reg-120 "AC Charge Based On" selector decides which AC-charge
+    controls the firmware honors: the time windows (Time / Time+SOC/Volt modes)
+    or the battery thresholds (Volt / Time+SOC/Volt modes) — see the
+    AC_CHARGE_TYPE evidence block in const/modbus.py. Entities on the
+    ignored side gate themselves unavailable, mirroring the vendor app.
+
+    Returns False only when the device is positively-identified EG4_HYBRID
+    (the sole family where the field layout is pinned and the select is
+    created) AND the cached BIT_AC_CHARGE_TYPE holds a KNOWN cloud-space
+    value (0/2/4) outside ``modes``. Missing, unparseable, or unrecognized
+    values fail OPEN — a convenience gate must never take working controls
+    away on absent or unexpected data.
+    """
+    data = coordinator.data or {}
+    device_data = (data.get("devices") or {}).get(serial) or {}
+    if not is_hybrid_family(device_data):
+        return True
+    params = (data.get("parameters") or {}).get(serial) or {}
+    raw_value = params.get(PARAM_BIT_AC_CHARGE_TYPE)
+    if isinstance(raw_value, bool):
+        # pylxpweb's mis-modeled single-bit decode emits BOOLS for this key
+        # (see the AC_CHARGE_TYPE evidence block in const/modbus.py), and
+        # False would otherwise parse as the legitimate "Time" (0) — a
+        # confidently wrong gate. The mis-decode's own shape is treated as
+        # unparseable so the fail-open promise holds where it matters most.
+        return True
+    try:
+        value = int(float(raw_value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
+    if value not in AC_CHARGE_TYPE_KNOWN_VALUES:
+        return True
+    return value in modes
 
 
 @callback

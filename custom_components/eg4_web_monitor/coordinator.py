@@ -38,6 +38,7 @@ from pylxpweb import LuxpowerClient
 from pylxpweb.devices import Station
 from pylxpweb.devices.inverters.base import BaseInverter
 from .const import (
+    AC_CHARGE_TYPE_FIELD_MASK,
     BLOCK_SIZE_PRESET_REGISTERS,
     CONF_BASE_URL,
     CONF_CHARGE_CONTROL_MODE,
@@ -51,8 +52,10 @@ from .const import (
     DEFAULT_CONTROL_MODE,
     DEFAULT_BASE_URL,
     DEFAULT_MODBUS_BLOCK_SIZE,
+    PARAM_BIT_AC_CHARGE_TYPE,
     PARAM_FUNC_BAT_CHARGE_CONTROL,
     PARAM_FUNC_BAT_DISCHARGE_CONTROL,
+    REG_AC_CHARGE_TYPE,
     CONF_DONGLE_PORT,
     CONF_DONGLE_SERIAL,
     CONF_DONGLE_UPDATE_INTERVAL,
@@ -1748,6 +1751,66 @@ class EG4DataUpdateCoordinator(
             failure_args=(address,),
             translated_error=lambda err: f"Failed to write register {address}: {err}",
         )
+
+    async def write_ac_charge_type(self, serial: str, value: int) -> bool:
+        """Write the AC-charge-type field (reg 120 bits 1-3) via local RMW.
+
+        ``value`` is the cloud-space field value (0/2/4 — see the
+        AC_CHARGE_TYPE constants block in const/modbus.py), which equals the
+        raw register bits under AC_CHARGE_TYPE_FIELD_MASK. pylxpweb's named
+        write path is bypassed: its reg-120 map models BIT_AC_CHARGE_TYPE as
+        single bit 3, so write_named_parameters() would flip the wrong bit.
+
+        Read-modify-write preserves the other reg-120 bits, and a post-write
+        read verifies the field landed — register 229 on the GridBOSS
+        silently reverts rejected writes (echoed OK, reverted <1 s), so
+        holding-register writes on this platform are not trusted without a
+        readback. The verify narrows that failure mode without closing it:
+        an immediate readback can still win a race against a sub-second
+        firmware revert, and a transiently failed verify read reports
+        failure for a write that in fact landed (fail-safe: the optimistic
+        state reverts and the next parameter refresh shows the truth).
+
+        Raises:
+            HomeAssistantError: No local transport, or the write/verify
+                failed.
+        """
+
+        async def _rmw(transport: Any) -> None:
+            current = await transport.read_parameters(REG_AC_CHARGE_TYPE, 1)
+            if not isinstance(current, dict) or REG_AC_CHARGE_TYPE not in current:
+                raise RuntimeError("pre-write read of register 120 returned no value")
+            new_value = (
+                int(current[REG_AC_CHARGE_TYPE]) & ~AC_CHARGE_TYPE_FIELD_MASK
+            ) | value
+            await transport.write_parameters({REG_AC_CHARGE_TYPE: new_value})
+            verify = await transport.read_parameters(REG_AC_CHARGE_TYPE, 1)
+            if not isinstance(verify, dict) or REG_AC_CHARGE_TYPE not in verify:
+                raise RuntimeError("post-write read of register 120 returned no value")
+            readback = int(verify[REG_AC_CHARGE_TYPE]) & AC_CHARGE_TYPE_FIELD_MASK
+            if readback != value:
+                raise RuntimeError(
+                    f"register 120 readback field {readback} != requested {value}"
+                )
+
+        result = await self._write_with_local_transport(
+            serial=serial,
+            no_transport_message="No local transport available for parameter write",
+            reconnect_message="Reconnecting transport for %s before writing AC charge type",
+            reconnect_args=(serial,),
+            write=_rmw,
+            success_message="Wrote AC charge type field = %s for %s",
+            success_args=(value, serial),
+            failure_message="Failed to write AC charge type for %s: %s",
+            failure_args=(serial,),
+            translated_error=lambda err: f"Failed to write AC charge type: {err}",
+        )
+        if result:
+            # Seed the cache in cloud space so the entity converges even if
+            # the follow-up refresh fails (the #362/#379 retention machinery
+            # bridges the gap, but a seeded cache is the actual device truth).
+            self.note_parameters_written(serial, {PARAM_BIT_AC_CHARGE_TYPE: value})
+        return result
 
     async def write_register(
         self,

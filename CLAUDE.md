@@ -457,7 +457,8 @@ class EG4QuickChargeSwitch(EG4BaseSwitch):
 | PV Charge Power | 74 | 100 W units (reg 64 is the legacy percent command; the entity reads/writes 74) |
 | Discharge Power | 65 | 0-100% |
 | AC Charge Power | 66 | 0-100% |
-| AC Charge SOC Limit | 67 | 0-100% (grid-tied families only; removed on EG4_OFFGRID, #331/#332) |
+| AC Charge SOC Limit | 67 | 0-100% (grid-tied families only; removed on EG4_OFFGRID, #331/#332; on EG4_HYBRID gated unavailable while AC Charge Based On = Time) |
+| AC Charge Based On | 120, bits 1-3 | 3-bit field; cloud/app value = raw & 0x0E: 0=Time, 2=Volt, 4=Time+SOC/Volt (EG4_HYBRID only; raw local RMW + cloud bitParamControl — pylxpweb's named model for this key is wrong, see const/modbus.py) |
 | AC Charge Start / End Battery SOC | 160 / 161 | Start 0-90% on EG4_OFFGRID + EG4_HYBRID (#331/#488; reg-160 write cap per pylxpweb); End 0-100% on EG4_OFFGRID only (read-only on grid-tied, #332 note) |
 | Charge Current | 101 | Amps |
 | Discharge Current | 102 | Amps |
@@ -467,7 +468,7 @@ class EG4QuickChargeSwitch(EG4BaseSwitch):
 | AC Couple | 179, bit 11 | Bit field (#471/#472; lineage-inferred, not toggle-pinned) |
 | System Charge Voltage Limit | 228 | Decivolts |
 | On-Grid / Off-Grid Cut-Off Voltage | 169 / 100 | Decivolts |
-| AC Charge Start / End Voltage | 158 / 159 | Decivolts |
+| AC Charge Start / End Voltage | 158 / 159 | Decivolts (on EG4_HYBRID gated unavailable while AC Charge Based On = Time) |
 | Stop Discharge Voltage | 202 | Decivolts |
 | Grid Sell Back | 21, bit 15 | Bit field (#135) |
 | Export PV Only | 179, bit 3 | Bit field (#135) |

@@ -54,10 +54,11 @@ from pylxpweb.endpoints.control import ControlEndpoints
 
 from . import EG4ConfigEntry
 from .base_entity import EG4BaseTime
-from .const import SCHEDULE_TIME_TYPES, ScheduleTimeSpec
+from .const import AC_CHARGE_TYPE_TIME_MODES, SCHEDULE_TIME_TYPES, ScheduleTimeSpec
 from .control_discovery import setup_control_entity_discovery
 from .coordinator import EG4DataUpdateCoordinator
 from .utils import (
+    ac_charge_type_allows,
     async_write_with_cloud_fallback,
     flag_offgrid_control_suppression,
     is_hybrid_family,
@@ -318,8 +319,22 @@ class EG4ScheduleTimeEntity(EG4BaseTime, TimeEntity):
 
     @property
     def available(self) -> bool:
-        """Unavailable until the schedule parameter has been polled."""
-        return super().available and self.native_value is not None
+        """Unavailable until the schedule parameter has been polled.
+
+        The AC Charge windows additionally gate on the reg-120 "AC Charge
+        Based On" selection (EG4_HYBRID only): in the app's "SOC/Volt" mode the
+        firmware ignores the windows entirely, so the entities go
+        unavailable rather than offering dead controls — mirroring the
+        vendor app. Fails open on missing or unrecognized mode data
+        (:func:`utils.ac_charge_type_allows`).
+        """
+        if not (super().available and self.native_value is not None):
+            return False
+        if self._spec.key == "ac_charge":
+            return ac_charge_type_allows(
+                self.coordinator, self.serial, AC_CHARGE_TYPE_TIME_MODES
+            )
+        return True
 
     def _cache_state(self) -> time | None:
         """Return the boundary decoded from the parameter cache.

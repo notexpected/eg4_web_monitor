@@ -11,7 +11,11 @@ from pylxpweb import OperatingMode
 
 from . import EG4ConfigEntry
 from .const import (
+    AC_CHARGE_TYPE_TIME,
+    AC_CHARGE_TYPE_TIME_SOC_VOLT,
+    AC_CHARGE_TYPE_SOC_VOLT,
     DEVICE_TYPE_GRIDBOSS,
+    PARAM_BIT_AC_CHARGE_TYPE,
     PARAM_FUNC_BAT_CHARGE_CONTROL,
     PARAM_FUNC_BAT_DISCHARGE_CONTROL,
     PARAM_HOLD_PV_INPUT_MODE,
@@ -24,6 +28,7 @@ from .utils import (
     create_device_info,
     generate_entity_id,
     generate_unique_id,
+    is_hybrid_family,
     is_supported_control_model,
 )
 
@@ -59,6 +64,18 @@ PV_INPUT_MODE_OPTIONS = [
 # Bidirectional mapping: label <-> register value
 PV_INPUT_MODE_TO_VALUE = {label: idx for idx, label in enumerate(PV_INPUT_MODE_OPTIONS)}
 PV_INPUT_VALUE_TO_MODE = {idx: label for idx, label in enumerate(PV_INPUT_MODE_OPTIONS)}
+
+# "AC Charge Based On" options (register 120 bits 1-3, EG4_HYBRID only).
+# Labels are the vendor app's three options; values are the cloud-space
+# field (raw & 0x0E) — see the AC_CHARGE_TYPE evidence block in
+# const/modbus.py for the live lockstep pinning both.
+AC_CHARGE_TYPE_OPTIONS = ["Time", "SOC/Volt", "Time+SOC/Volt"]
+AC_CHARGE_TYPE_TO_VALUE = {
+    "Time": AC_CHARGE_TYPE_TIME,
+    "SOC/Volt": AC_CHARGE_TYPE_SOC_VOLT,
+    "Time+SOC/Volt": AC_CHARGE_TYPE_TIME_SOC_VOLT,
+}
+AC_CHARGE_TYPE_VALUE_TO_OPTION = {v: k for k, v in AC_CHARGE_TYPE_TO_VALUE.items()}
 
 # Smart Port mode options (GridBOSS holding register 20, bit-packed 2 bits per port)
 SMART_PORT_MODE_OPTIONS = ["Unused", "Smart Load", "AC Couple"]
@@ -116,9 +133,18 @@ def _create_select_entities(
                 entities.append(
                     EG4BatteryDischargeControlSelect(coordinator, serial, device_data)
                 )
+                # AC Charge Based On (reg 120): the field layout is pinned on
+                # the FlexBOSS21 only, so creation fails closed on anything
+                # not positively identified as EG4_HYBRID (the #488-review
+                # convention for AC-charge controls).
+                if is_hybrid_family(device_data):
+                    entities.append(
+                        EG4ACChargeTypeSelect(coordinator, serial, device_data)
+                    )
                 _LOGGER.debug(
-                    "Added operating mode, PV input mode, and battery control "
-                    "selects for device %s (%s)",
+                    "Added operating mode, PV input mode, battery control, "
+                    "and (on EG4_HYBRID) AC charge type selects for device "
+                    "%s (%s)",
                     serial,
                     model,
                 )
@@ -407,6 +433,146 @@ class EG4PVInputModeSelect(EG4BaseSelect):
         )
         await self._settle_acknowledged_write(
             f"PV input mode to {option}",
+            pre_write_state,
+            lambda: self.coordinator.async_refresh_device_parameters(self._serial),
+        )
+
+
+class EG4ACChargeTypeSelect(EG4BaseSelect):
+    """Select for "AC Charge Based On" (register 120 bits 1-3, EG4_HYBRID).
+
+    Chooses what arms grid (AC) charging: the time windows ("Time"), the
+    battery thresholds ("SOC/Volt"), or both ("Time+SOC/Volt") — the vendor app's
+    three options. Values travel in cloud space (0/2/4); the AC_CHARGE_TYPE
+    evidence block in const/modbus.py holds the register layout, the live
+    lockstep evidence, and the pylxpweb hazards that make this entity bypass
+    pylxpweb's ac-charge-type helpers on BOTH write paths.
+
+    The related controls (AC Charge schedule times, AC Charge SOC Limit)
+    gate their availability on this selection via
+    :func:`utils.ac_charge_type_allows`, mirroring the vendor app.
+    """
+
+    def __init__(
+        self,
+        coordinator: EG4DataUpdateCoordinator,
+        serial: str,
+        device_data: dict[str, Any],
+    ) -> None:
+        """Initialize the AC charge type select."""
+        super().__init__(coordinator, serial)
+
+        self._model = _get_model(coordinator, serial)
+        self._attr_unique_id = generate_unique_id(serial, "ac_charge_based_on")
+        self._attr_entity_id = generate_entity_id(
+            "select", self._model, serial, "ac_charge_based_on"
+        )
+        self._attr_has_entity_name = True
+        self._attr_name = "AC Charge Based On"
+        self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_icon = "mdi:battery-clock"
+        self._attr_options = AC_CHARGE_TYPE_OPTIONS
+        self._attr_device_info = create_device_info(serial, self._model)
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the current AC charge type as an app-label option.
+
+        Values outside the app's three (a firmware state like the bare
+        protocol-Time field this integration once wrote by accident) render
+        as None rather than a wrong label.
+        """
+        if self._optimistic_state is not None:
+            return self._optimistic_state
+
+        if self.coordinator.data and "parameters" in self.coordinator.data:
+            device_params = self.coordinator.data["parameters"].get(self._serial, {})
+            value = device_params.get(PARAM_BIT_AC_CHARGE_TYPE)
+            # Bools are pylxpweb's mis-decode shape for this key (its
+            # single-bit model of the 3-bit field); False would otherwise
+            # parse as the legitimate "Time" (0). Render unknown instead of
+            # a wrong label.
+            if value is not None and not isinstance(value, bool):
+                try:
+                    return AC_CHARGE_TYPE_VALUE_TO_OPTION.get(int(float(value)))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        if not self.coordinator.last_update_success:
+            return False
+        if self.coordinator.data and "devices" in self.coordinator.data:
+            device_data = self.coordinator.data["devices"].get(self._serial, {})
+            return bool(device_data.get("type") == "inverter")
+        return False
+
+    async def async_select_option(self, option: str) -> None:
+        """Change the AC charge type via local Modbus or cloud API."""
+        if option not in AC_CHARGE_TYPE_TO_VALUE:
+            raise HomeAssistantError(f"Invalid AC charge type: {option}")
+
+        int_value = AC_CHARGE_TYPE_TO_VALUE[option]
+
+        _LOGGER.info(
+            "Setting AC charge type to %s (%d) for device %s",
+            option,
+            int_value,
+            self._serial,
+        )
+
+        pre_write_state = self._begin_optimistic_write(option)
+
+        try:
+
+            async def _local_write() -> None:
+                # Local Modbus: verified RMW on the raw register — pylxpweb's
+                # named write would flip a single bit (wrong layout).
+                await self.coordinator.write_ac_charge_type(self._serial, int_value)
+
+            async def _cloud_write() -> None:
+                # Cloud API: the named bit param takes the cloud-space value
+                # directly (live-verified). Deliberately NOT pylxpweb's
+                # set_ac_charge_type(), which shifts the field down and would
+                # write the wrong value for every non-Time option.
+                client = self.coordinator.require_client()
+                result = await client.api.control.control_bit_param(
+                    self._serial, PARAM_BIT_AC_CHARGE_TYPE, int_value
+                )
+                if not result.success:
+                    raise HomeAssistantError(
+                        f"Failed to set AC charge type to {option}"
+                    )
+                await self.coordinator.refresh_inverter_params_if_linked(self._serial)
+
+            await async_write_with_cloud_fallback(
+                self.coordinator,
+                self._serial,
+                f"AC charge type to {option}",
+                local_write=_local_write,
+                cloud_write=_cloud_write,
+                local_values={PARAM_BIT_AC_CHARGE_TYPE: int_value},
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Failed to set AC charge type to %s for device %s: %s",
+                option,
+                self._serial,
+                e,
+            )
+            self._end_retention()
+            self.async_write_ha_state()
+            raise
+
+        _LOGGER.info(
+            "Successfully set AC charge type to %s for device %s",
+            option,
+            self._serial,
+        )
+        await self._settle_acknowledged_write(
+            f"AC charge type to {option}",
             pre_write_state,
             lambda: self.coordinator.async_refresh_device_parameters(self._serial),
         )

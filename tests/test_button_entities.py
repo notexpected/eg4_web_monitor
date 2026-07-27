@@ -91,6 +91,11 @@ class TestEG4RefreshButton:
         coordinator._refresh_device_parameters = types.MethodType(
             ParameterManagementMixin._refresh_device_parameters, coordinator
         )
+        # The real overlay too: it must no-op on a cloud-served fetch (no
+        # transport / link down) without disturbing the refresh contract.
+        coordinator._overlay_ac_charge_type = types.MethodType(
+            ParameterManagementMixin._overlay_ac_charge_type, coordinator
+        )
 
         mock_inverter = MagicMock()
         mock_inverter.transport = None  # no local transport -> link not down
@@ -132,6 +137,11 @@ class TestEG4RefreshButton:
         coordinator.async_request_refresh = AsyncMock()
         coordinator._refresh_device_parameters = types.MethodType(
             ParameterManagementMixin._refresh_device_parameters, coordinator
+        )
+        # The real overlay too: it must no-op on a cloud-served fetch (no
+        # transport / link down) without disturbing the refresh contract.
+        coordinator._overlay_ac_charge_type = types.MethodType(
+            ParameterManagementMixin._overlay_ac_charge_type, coordinator
         )
 
         mock_inverter = MagicMock()

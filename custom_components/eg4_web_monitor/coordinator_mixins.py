@@ -40,10 +40,13 @@ if TYPE_CHECKING:
     _DeviceObject = BaseInverter | Battery | BatteryBank | MIDDevice | ParallelGroup
 
 from .const import (
+    AC_CHARGE_TYPE_FIELD_MASK,
     CONF_LOCAL_TRANSPORTS,
     DOMAIN,
     INVERTER_FAMILY_EG4_OFFGRID,
     MANUFACTURER,
+    PARAM_BIT_AC_CHARGE_TYPE,
+    REG_AC_CHARGE_TYPE,
     operating_state_slug,
 )
 from .cloud_requests import (
@@ -4255,6 +4258,64 @@ class ParameterManagementMixin(_MixinBase):
             return False
         return refreshed and not incomplete
 
+    async def _overlay_ac_charge_type(self, serial: str, inverter: Any) -> None:
+        """Correct BIT_AC_CHARGE_TYPE after a transport-served parameter fetch.
+
+        pylxpweb's REGISTER_TO_PARAM_KEYS[120] models BIT_AC_CHARGE_TYPE as a
+        single bit (index 1 as of 0.9.39b8), so a parameter fetch served over
+        the local
+        transport publishes a garbage value for the key — and a garbage 0
+        collides with the real "Time" (0) in cloud space (see the
+        AC_CHARGE_TYPE evidence block in const/modbus.py). Whenever the fetch
+        could have been served locally (transport attached, link up — the
+        same condition pylxpweb's ``_fetch_parameters`` uses to pick its
+        local branch), re-read the register RAW over the transport and store
+        the cloud-space value (raw & mask). The raw read is deliberate:
+        pylxpweb's ``get_ac_charge_type()`` decodes correctly but exists
+        only on its hybrid inverter class, and this integration's device
+        objects are ``GenericInverter`` (live-verified AttributeError).
+        Cloud-served fetches (no transport, or the HYBRID link-down
+        fallback) are left alone: the server decodes the field correctly.
+
+        When the re-read FAILS, the key is dropped only if it holds the
+        mis-decode's shape (pylxpweb's single-bit decode emits bools) —
+        unknown beats garbage. A non-bool value is kept: on a degraded
+        transport the fetch itself failed the same way and pylxpweb kept
+        its previous parameters dict, so the cached value is the
+        carried-forward, previously corrected one, and the two failures are
+        correlated — dropping it would discard exactly what the #282
+        carry-forward exists to preserve (adversarial-review finding). A
+        kept bool would be inert anyway: both consumers treat bools as
+        unparseable and fail open.
+
+        A link flap between the fetch and this overlay can misclassify one
+        refresh; the next parameter refresh heals it.
+        """
+        params = getattr(inverter, "parameters", None)
+        if not isinstance(params, dict) or PARAM_BIT_AC_CHARGE_TYPE not in params:
+            return
+        transport = getattr(inverter, "transport", None)
+        if transport is None:
+            return
+        if is_transport_link_down(inverter):
+            return
+        try:
+            raw_map = await transport.read_parameters(REG_AC_CHARGE_TYPE, 1)
+            if not isinstance(raw_map, dict) or REG_AC_CHARGE_TYPE not in raw_map:
+                raise TypeError("read returned no register 120 value")
+            params[PARAM_BIT_AC_CHARGE_TYPE] = (
+                int(raw_map[REG_AC_CHARGE_TYPE]) & AC_CHARGE_TYPE_FIELD_MASK
+            )
+        except Exception as err:
+            if isinstance(params.get(PARAM_BIT_AC_CHARGE_TYPE), bool):
+                params.pop(PARAM_BIT_AC_CHARGE_TYPE, None)
+            _LOGGER.debug(
+                "AC charge type overlay read failed for %s; keeping the "
+                "cache free of a mis-decoded value: %s",
+                serial,
+                err,
+            )
+
     async def _refresh_device_parameters(
         self, serial: str, *, include_runtime_data: bool = False
     ) -> bool:
@@ -4305,6 +4366,9 @@ class ParameterManagementMixin(_MixinBase):
                 # This is the dependency's same locked parameter implementation,
                 # invoked directly so its runtime caches are untouched.
                 await inverter._fetch_parameters()
+            # Correct the reg-120 AC-charge-type mis-decode after either fetch
+            # path (see :meth:`_overlay_ac_charge_type`).
+            await self._overlay_ac_charge_type(serial, inverter)
 
             if hasattr(inverter, "parameters") and inverter.parameters:
                 if not self.data:

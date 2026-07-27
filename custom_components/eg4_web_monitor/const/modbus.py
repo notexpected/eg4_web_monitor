@@ -204,6 +204,58 @@ REG_START_PV_VOLT = 22
 REG_PTOUSER_START_CHARGE = 117
 
 # =============================================================================
+# AC Charge Based On selector (register 120, bits 1-3)
+# =============================================================================
+# The selector that arms grid (AC) charging: by schedule, by battery
+# threshold, or both. The 3-bit field lives at register 120 bits 1-3; the
+# cloud named parameter BIT_AC_CHARGE_TYPE carries the field IN PLACE
+# (raw & 0x0E — the field value shifted left by one), NOT the shifted-down
+# field value and NOT the 0/1/2 enum pylxpweb documents. Pinned on a live
+# FlexBOSS21 (2026-07-26/27):
+#   - simultaneous lockstep: local Modbus raw 0x0054 (field (raw>>1)&7 = 2)
+#     while the cloud named read reports BIT_AC_CHARGE_TYPE = 4;
+#   - live app lockstep: cloud read 2 while the owner's app displayed
+#     "SOC/Volt"; bitParamControl write of 4 (the app's "Time+SOC/Volt") sticks,
+#     re-reads 4, and preserves the neighboring reg-120 bits.
+# The EG4 UI presents three options; pylxpweb's constants block pins their
+# raw values 0/2/4 by Modbus probe against its own FlexBOSS21 (labeled
+# Time / SOC-Volt / Time+SOC-Volt there). App labels "SOC/Volt" (2) and
+# "Time+SOC/Volt" (4) are live-verified above; "Time" (0) follows from that
+# probe. The LuxPower 6-mode protocol map (1=Time, 2=Volt, 4=Volt+Time on
+# the shifted field) is DISPROVEN on this firmware by the lockstep — field
+# 2 is Time+SOC/Volt here, not Volt.
+#
+# pylxpweb hazards (0.9.39b8) — why the integration bypasses its helpers
+# for this register:
+#   - REGISTER_TO_PARAM_KEYS[120] models BIT_AC_CHARGE_TYPE as a single bit
+#     (index 1 as of 0.9.39b8; was index 3 through 0.9.39b4 — the position
+#     drifts but the single-bit mis-model of the 3-bit field persists),
+#     so transport read_named_parameters() returns garbage for the key (and
+#     a HYBRID full-range parameter refresh publishes it — see the
+#     coordinator's _overlay_ac_charge_type);
+#   - cloud set_ac_charge_type()/get_ac_charge_type() speak the shifted
+#     0/1/2 field while the wire wants/serves 0/2/4 — off by the shift for
+#     every non-Time value.
+# The parameter cache stores CLOUD-space values (0/2/4) everywhere; the
+# LOCAL read/write paths convert at the register edge (raw & mask).
+PARAM_BIT_AC_CHARGE_TYPE = "BIT_AC_CHARGE_TYPE"
+REG_AC_CHARGE_TYPE = 120
+AC_CHARGE_TYPE_FIELD_MASK = 0x0E  # bits 1-3; cloud value == raw & mask
+AC_CHARGE_TYPE_TIME = 0
+AC_CHARGE_TYPE_SOC_VOLT = 2
+AC_CHARGE_TYPE_TIME_SOC_VOLT = 4
+# Modes that honor the AC charge time windows (regs 68-73) / the battery
+# thresholds (regs 158-161 and, on grid-tied families, the reg-67 SOC
+# limit). Drives the mode-based availability gating.
+AC_CHARGE_TYPE_TIME_MODES = frozenset(
+    {AC_CHARGE_TYPE_TIME, AC_CHARGE_TYPE_TIME_SOC_VOLT}
+)
+AC_CHARGE_TYPE_THRESHOLD_MODES = frozenset(
+    {AC_CHARGE_TYPE_SOC_VOLT, AC_CHARGE_TYPE_TIME_SOC_VOLT}
+)
+AC_CHARGE_TYPE_KNOWN_VALUES = AC_CHARGE_TYPE_TIME_MODES | AC_CHARGE_TYPE_THRESHOLD_MODES
+
+# =============================================================================
 # AC charge time schedule (registers 68-73, issue #277)
 # =============================================================================
 # Three daily windows × (start, end) = six registers from base 68:

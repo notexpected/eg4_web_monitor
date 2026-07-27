@@ -25,6 +25,7 @@ from pylxpweb.transports import (
 )
 
 from .const import (
+    AC_CHARGE_TYPE_FIELD_MASK,
     CONF_GRID_TYPE,
     CONF_INCLUDE_AC_COUPLE_PV,
     CONNECTION_TYPE_DONGLE,
@@ -39,6 +40,8 @@ from .const import (
     GRID_TYPE_SPLIT_PHASE,
     INVERTER_FAMILY_DEFAULT_MODELS,
     MANUFACTURER,
+    PARAM_BIT_AC_CHARGE_TYPE,
+    REG_AC_CHARGE_TYPE,
 )
 from .coordinator_mixins import (
     BATTERY_CARRY_FORWARD_MAX_AGE,
@@ -721,6 +724,47 @@ class LocalTransportMixin(_MixinBase):
                         start + count - 1,
                         range_err,
                     )
+
+            # AC Charge Based On (reg 120 bits 1-3): read RAW and decode
+            # integration-side — pylxpweb's read_named_parameters() models
+            # BIT_AC_CHARGE_TYPE as single bit 3 (wrong layout; see the
+            # AC_CHARGE_TYPE evidence block in const/modbus.py), so the
+            # register is deliberately absent from register_ranges above.
+            # Family-gated like the schedule ranges, with the same
+            # fails-closed predicate as the consuming select's creation
+            # gate: the field layout is pinned on the FlexBOSS21
+            # (EG4_HYBRID) only. Stored in cloud space (raw & mask), the
+            # representation the whole cache uses for this key.
+            #
+            # A failure carries the last-known value forward for THIS key
+            # only, deliberately NOT via failed_ranges: the field is pinned
+            # on a single model, and a family member that NAKs reg 120
+            # would otherwise mark every parameter cycle incomplete and
+            # loop the #282 early retry for a convenience selector (the
+            # same blast-radius concern as the #488 widened voltage read).
+            # The next regular parameter cycle retries the read anyway.
+            if is_hybrid:
+                raw_map: Any = None
+                try:
+                    raw_map = await transport.read_parameters(REG_AC_CHARGE_TYPE, 1)
+                except Exception as err:
+                    _LOGGER.debug("Failed to read AC charge type register 120: %s", err)
+                if isinstance(raw_map, dict) and REG_AC_CHARGE_TYPE in raw_map:
+                    params[PARAM_BIT_AC_CHARGE_TYPE] = (
+                        int(raw_map[REG_AC_CHARGE_TYPE]) & AC_CHARGE_TYPE_FIELD_MASK
+                    )
+                else:
+                    serial = getattr(device, "serial_number", None)
+                    previous = (
+                        ((self.data or {}).get("parameters") or {})
+                        .get(serial or "", {})
+                        .get(PARAM_BIT_AC_CHARGE_TYPE)
+                    )
+                    # Never perpetuate a bool: that is pylxpweb's mis-decode
+                    # shape (see _overlay_ac_charge_type), not a value this
+                    # read path ever produced.
+                    if previous is not None and not isinstance(previous, bool):
+                        params[PARAM_BIT_AC_CHARGE_TYPE] = previous
 
             if failed_ranges:
                 complete = False
