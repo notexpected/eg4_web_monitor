@@ -1838,3 +1838,45 @@ class TestIssue641:
                 sync.async_sync(data)
         assert not self._hints(caplog)
         assert self._named_for(hass, lone.entity_id) == "smart_load"
+
+
+class TestTestBuildEntries:
+    """Fork test builds only (mirrors a real registry from those builds)."""
+
+    async def test_energy_adopted_and_unmarked_disables_handed_to_sync(
+        self, hass: HomeAssistant
+    ):
+        from custom_components.eg4_web_monitor.coordinator_mappings import (
+            SMART_PORT_READ_KEY,
+        )
+        from custom_components.eg4_web_monitor.smart_port_devices import (
+            async_adopt_test_build_entries,
+        )
+
+        entry = _entry(hass)
+        registry = er.async_get(hass)
+        energy = _seed(
+            hass, entry, f"{GB}_smart_port1_today", "sensor.gridboss_smart_load_1_today"
+        )
+        power = _seed(
+            hass, entry, f"{GB}_smart_port4_power", "sensor.p4", disabled_by=INTEGRATION
+        )
+        pref = _seed(hass, entry, "unrelated_uid", "sensor.x", disabled_by=INTEGRATION)
+        unknown = _seed(hass, entry, f"{GB}_smart_port2_today", "sensor.p2_today")
+        sensors = _statuses("smart_load", "unused", "unused", "smart_load")
+        data = {"devices": {GB: _gridboss(sensors)}}
+
+        async_adopt_test_build_entries(hass, entry, data)
+
+        assert registry.async_get(energy.entity_id).unique_id == (
+            f"{GB}_smart_port1_smart_load_today"
+        )
+        assert registry.async_get(unknown.entity_id).unique_id == unknown.unique_id
+
+        sync = PortSensorEnablement(hass, entry)
+        for read in (1.0, 2.0):
+            sync.async_sync(
+                {"devices": {GB: _gridboss({**sensors, SMART_PORT_READ_KEY: read})}}
+            )
+        assert registry.async_get(power.entity_id).disabled_by is None
+        assert registry.async_get(pref.entity_id).disabled_by is INTEGRATION

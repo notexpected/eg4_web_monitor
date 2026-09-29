@@ -73,6 +73,7 @@ from .history_import import (
 )
 from .endpoint_bus import get_endpoint_bus_registry
 from .smart_port_devices import (
+    async_adopt_test_build_entries,
     async_migrate_to_port_sensors,
     set_deferred_port_sensors,
 )
@@ -1445,6 +1446,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: EG4ConfigEntry) -> bool
     # entries (smart_load{n}_* / ac_couple{n}_*) as the port sensors, keeping
     # registry entries (entity IDs, history) by rewriting unique IDs.  Runs
     # before the stale cleanup below and before the platforms load.
+    async_adopt_test_build_entries(hass, entry, coordinator.data)
     set_deferred_port_sensors(
         coordinator,
         async_migrate_to_port_sensors(hass, entry, coordinator.data),
