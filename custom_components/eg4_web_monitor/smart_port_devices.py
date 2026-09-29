@@ -602,3 +602,63 @@ def _supersede(registry: er.EntityRegistry, entry: er.RegistryEntry) -> None:
     options = dict(entry.options.get(DOMAIN) or {})
     options[_SUPERSEDED_OPTION] = True
     registry.async_update_entity_options(entry.entity_id, DOMAIN, options)
+
+
+def async_adopt_test_build_entries(
+    hass: HomeAssistant, entry: ConfigEntry, data: dict[str, Any] | None
+) -> None:
+    """Fork test builds only: bring their registry entries under this code.
+
+    - Their single mode-neutral energy entity per port
+      (``{serial}_smart_port{n}_today`` / ``_total``) is adopted as the
+      energy entity of the port's current mode, keeping entity ID and
+      history.  Skipped when the port's mode is unknown or the target exists.
+    - Port entities they disabled for an inactive mode carry no sync marker,
+      so the sync would never re-enable them: mark each integration-disabled,
+      unmarked port sensor as the sync's own.
+    Not part of the upstream change: those entries never shipped.
+    """
+    registry = er.async_get(hass)
+    gridboss = _gridboss_sensors(data)
+    port_ids = {
+        port_sensor_unique_id(serial, port, spec.id_suffix)
+        for serial in gridboss
+        for port in range(1, 5)
+        for spec in PORT_SENSOR_SPECS
+    }
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if registry_entry.domain != "sensor":
+            continue
+        unique_id = registry_entry.unique_id
+        for serial, sensors in gridboss.items():
+            for port in range(1, 5):
+                for key_suffix in _ENERGY_NAMES:
+                    if unique_id != port_sensor_unique_id(serial, port, key_suffix):
+                        continue
+                    mode = resolve_port_mode(sensors, port)
+                    if mode not in ACTIVE_PORT_MODES:
+                        continue
+                    target = port_sensor_unique_id(serial, port, f"{mode}_{key_suffix}")
+                    if registry.async_get_entity_id("sensor", DOMAIN, target):
+                        continue
+                    _LOGGER.info(
+                        "Adopting test-build %s as smart port sensor %s",
+                        registry_entry.entity_id,
+                        target,
+                    )
+                    registry.async_update_entity(
+                        registry_entry.entity_id, new_unique_id=target
+                    )
+                    unique_id = target
+        current = registry.async_get(registry_entry.entity_id)
+        if (
+            current is not None
+            and unique_id in port_ids
+            and current.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+            and _SYNC_OPTION not in dict(current.options.get(DOMAIN) or {})
+        ):
+            _LOGGER.info(
+                "Handing test-build-disabled %s to the smart port sync",
+                registry_entry.entity_id,
+            )
+            _set_marker(registry, registry_entry.entity_id, _AUTO_DISABLED)
